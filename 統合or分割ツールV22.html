@@ -1,0 +1,1340 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>統合・分割・色付けツール（色CSV対応・順序保持出力・GSI淡色/白地図）</title>
+
+<!-- ライブラリ（パスは運用に合わせて）。ローカル優先。 -->
+<link rel="stylesheet" href="./libs/leaflet/leaflet.css"/>
+<script src="./libs/leaflet/leaflet.js"></script>
+<script src="./libs/shpjs/shp.min.js"></script>
+<script src="./libs/turf/turf.min.js"></script>
+
+<style>
+  html, body { height:100%; margin:0; overflow:hidden; font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans JP",sans-serif; }
+  #map { height:100%; background:#eef1f5; }
+
+  .panel, .legend, .status {
+    position: fixed;
+    background:#fff; border:1px solid #e5e7eb; border-radius:12px;
+    box-shadow:0 2px 12px rgba(0,0,0,.16);
+    z-index: 50000;
+  }
+  .panel { left:10px; top:10px; display:flex; flex-direction:column; max-width:900px; }
+  .legend{ left:10px; bottom:10px; display:flex; flex-direction:column; max-width:420px; }
+
+  .panel.minimized .drag-body,
+  .legend.minimized .drag-body { display: none !important; }
+
+  .legend .drag-body{
+    max-height: 20vh;
+    overflow:auto;
+    overscroll-behavior:contain;
+  }
+
+  .status {
+    right:12px; bottom:12px; padding:6px 12px; border-radius:999px;
+    white-space:nowrap; max-width:60vw; overflow:hidden; text-overflow:ellipsis;
+    background:#fff;
+  }
+
+  .drag-header{
+    cursor: move; user-select: none; touch-action: none;
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding:8px 10px; border-bottom:1px solid #e5e7eb; font-weight:700;
+    border-radius:12px 12px 0 0; background:#fff;
+  }
+  .drag-title{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .drag-btns{ display:flex; gap:6px; }
+  .drag-btn{ border:1px solid #cbd5e1; background:#fff; border-radius:8px; padding:2px 8px; cursor:pointer; font-size:12px; }
+
+  .drag-body{
+    background:#fff; border-radius:0 0 12px 12px;
+    max-height: 75vh;
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding-bottom:10px;
+  }
+
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:10px; padding-bottom:0; }
+  .subtle { color:#667085; font-size:12px; }
+  .pill { display:inline-block; padding:2px 8px; border:1px solid #e5e7eb; border-radius:999px; font-size:12px; }
+  .drop { outline:2px dashed #9aa4b2; outline-offset:-6px; border-radius:10px; padding:6px 8px; }
+  details.control summary { cursor:pointer; font-weight:700; padding:0 10px; }
+  details.control > div { padding:0 10px 10px; }
+  .btn { padding:6px 10px; border:1px solid #d0d5dd; background:#fff; border-radius:8px; cursor:pointer; }
+  .btn.primary { background:#155eef; color:#fff; border-color:#155eef; }
+  .btn.ghost { background:#f8fafc; }
+  input[type="number"] { width:100px; }
+  .mono{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+  textarea{width:100%; font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;}
+  .table { width:100%; border-collapse:collapse; font-size:12px; margin-top:6px; }
+  .table th, .table td { border:1px solid #e5e7eb; padding:6px 8px; text-align:left; vertical-align:top; }
+  .table th { background:#f8fafc; font-weight:600; }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+  .grid3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; }
+  .muted { color:#475467; }
+  .order-list{border:1px solid #e5e7eb;border-radius:10px;max-height:220px;overflow:auto;margin:0 10px 10px;background:#fff}
+  .order-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid #eef2f7;background:#fff}
+  .order-item:last-child{border-bottom:none}
+  .order-item.dragging{opacity:.6}
+  .order-key{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .order-btns button{padding:2px 6px;border-radius:6px;border:1px solid #d0d5dd;background:#f8fafc;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<!-- 操作メニュー -->
+<div class="panel" id="panel" aria-expanded="true">
+  <div class="drag-header" id="panel-head" title="ドラッグで移動 / ダブルクリックで最小化">
+    <span class="drag-title">操作メニュー</span>
+    <span class="drag-btns"><button class="drag-btn" id="panel-min" aria-label="最小化/復元">最小化</button></span>
+  </div>
+  <div class="drag-body" id="panel-body">
+    <div style="font-weight:800; margin:6px 10px;">統合・分割・色付けツール</div>
+    <div class="subtle" style="margin:0 10px 6px;">
+      GeoJSON / SHP(zip, <b>.cpg=CP932推奨</b>) を<b>複数追加</b>で読み込み、<b>色付け</b>・<b>レイヤ分割/順序</b>・<b>削除</b>・<b>カテゴリ統合</b>・<b>色CSV適用</b>・<b>順序保持出力</b>。
+    </div>
+
+    <div class="row">
+      <label class="drop">ファイル選択<input id="file" type="file" multiple style="display:none" accept=".geojson,.json,.zip,.shp,.dbf,.shx,.prj"/></label>
+      <button class="btn" id="btn-default">デフォルト</button>
+      <button class="btn" id="btn-clear">クリア</button>
+      <span class="pill" id="feat-count">0 features</span>
+      <label><input type="checkbox" id="append-mode"> 追加読込</label>
+      <label><input type="checkbox" id="tag-source" checked> _src=ファイル名 付与</label>
+    </div>
+
+    <!-- 1) 色付け（分類）＋キー統合＋カテゴリ統合＋色CSV -->
+    <details class="control" open>
+      <summary>1) 色付け（分類）</summary>
+      <div class="grid2" style="margin-top:6px;">
+        <label>分類キー<input id="class-key" placeholder="例: YoutoName"/></label>
+        <label>線幅(px)<input id="stroke-width" type="number" value="2"/></label>
+        <label>線不透明度(0-1)<input id="stroke-op" type="number" step="0.1" value="1"/></label>
+        <label>塗不透明度(0-1)<input id="fill-op" type="number" step="0.1" value="0.4"/></label>
+      </div>
+
+      <!-- キー統合 -->
+      <div style="margin-top:10px; padding:8px; border:1px dashed #d0d5dd; border-radius:10px;">
+        <div style="font-weight:700; margin-bottom:6px;">キー統合（色分類用）</div>
+        <div class="subtle">複数の列名から値を拾い、<b>統合キー</b>へコピー。</div>
+        <div class="grid2" style="gap:8px;">
+          <label>統合キー名<input id="unify-target" placeholder="例: ClassUnified"/></label>
+          <label>空のときの既定値<input id="unify-fallback" placeholder="未分類"/></label>
+        </div>
+        <label style="display:block; margin-top:6px;">コピー元キー（カンマ/改行区切り）
+          <textarea id="unify-sources" rows="3" placeholder="YoutoName, 用途, category"></textarea>
+        </label>
+        <div class="row" style="padding:6px 0 0 0;">
+          <label><input type="checkbox" id="unify-ci" checked/> コピー元キー名の大小無視</label>
+          <label><input type="checkbox" id="unify-nfkc" checked/> 値をNFKC正規化</label>
+          <label><input type="checkbox" id="unify-trim" checked/> 値の前後空白除去</label>
+        </div>
+        <div class="row" style="margin-top:6px;">
+          <button class="btn" id="btn-unify-preview">統合プレビュー</button>
+          <button class="btn primary" id="btn-unify">キー統合を実行</button>
+        </div>
+        <div id="unify-preview" class="mono" style="display:none; border:1px solid #e5e7eb;border-radius:8px;padding:8px;margin-top:6px;background:#fafafa;"></div>
+      </div>
+
+      <!-- カテゴリ統合 -->
+      <div style="margin-top:10px; padding:8px; border:1px dashed #d0d5dd; border-radius:10px;">
+        <div style="font-weight:700; margin-bottom:6px;">カテゴリ統合（値マージ）</div>
+        <div class="row">
+          <label><input type="checkbox" id="merge-ci" checked/> 大小無視</label>
+          <label><input type="checkbox" id="merge-nfkc" checked/> NFKC正規化</label>
+          <label><input type="checkbox" id="merge-trim" checked/> 前後空白除去</label>
+        </div>
+        <label>統合ルール（1行＝別名[,別名…] => 正式名）
+          <textarea id="merge-rules" rows="6" placeholder="住居地, 住宅地 => 住居系&#10;準工場 => 準工業"></textarea>
+        </label>
+        <div class="row" style="margin-top:6px;">
+          <button class="btn ghost" id="btn-merge-template">雛形生成</button>
+          <button class="btn" id="btn-merge-preview">プレビュー</button>
+          <button class="btn primary" id="btn-merge-apply">統合を実行</button>
+        </div>
+        <div id="merge-preview" class="mono" style="display:none; border:1px solid #e5e7eb;border-radius:8px;padding:8px;margin-top:6px;background:#fafafa;"></div>
+      </div>
+
+      <!-- 色CSV 読込 -->
+      <div style="margin-top:10px; padding:8px; border:1px dashed #d0d5dd; border-radius:10px;">
+        <div style="font-weight:700; margin-bottom:6px;">色CSVの読込（1列目=値, 2列目=#RRGGBB）</div>
+        <div class="row">
+          <input id="color-csv" type="file" accept=".csv"/>
+          <label><input type="radio" name="csv-mode" value="merge" checked/> マージ（既存を上書き）</label>
+          <label><input type="radio" name="csv-mode" value="replace"/> 置換（CSVで置き換え）</label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="csv-ci" checked/> 値の大小無視</label>
+          <label><input type="checkbox" id="csv-nfkc" checked/> NFKC正規化</label>
+          <label><input type="checkbox" id="csv-trim" checked/> 前後空白除去</label>
+          <label><input type="checkbox" id="csv-ignore-header" checked/> 先頭行をヘッダとして無視</label>
+        </div>
+        <div class="row">
+          <button class="btn" id="btn-color-preview">CSVプレビュー</button>
+          <button class="btn primary" id="btn-color-apply">CSVを適用</button>
+        </div>
+        <div id="color-preview" class="mono" style="display:none; border:1px solid #e5e7eb;border-radius:8px;padding:8px;margin-top:6px;background:#fafafa;"></div>
+      </div>
+
+      <div class="row" style="margin-top:8px;">
+        <button class="btn" id="btn-classify">分類テーブル作成</button>
+        <button class="btn ghost" id="btn-apply-style">地図に反映</button>
+        <button class="btn ghost" id="btn-make-legend">凡例更新</button>
+      </div>
+      <div id="class-table-wrap" style="padding:0 10px 10px;"></div>
+    </details>
+
+    <!-- 2) レイヤ分割＋順序 -->
+    <details class="control" open>
+      <summary>2) レイヤ分割＋順序</summary>
+      <div class="subtle">キーごとにレイヤ化し、ドラッグ/ボタンで描画順を調整。</div>
+      <div class="row">
+        <label>レイヤキー<input id="layer-key" placeholder="例: _src"/></label>
+        <label>初期並び
+          <select id="order-init">
+            <option value="asc">名前昇順</option>
+            <option value="desc">名前降順</option>
+            <option value="area_desc">総面積大</option>
+            <option value="area_asc">総面積小</option>
+          </select>
+        </label>
+        <button class="btn" id="btn-build-layers">レイヤ構築</button>
+        <button class="btn ghost" id="btn-clear-layers">レイヤ解除</button>
+      </div>
+      <div class="subtle" style="margin:6px 10px 2px;">順序（ドラッグ＆ドロップ / ▲▼）</div>
+      <div id="order-list" class="order-list" aria-label="layer order list"></div>
+      <div class="row" style="margin-top:6px;">
+        <button class="btn" id="btn-apply-order">順序を反映</button>
+        <button class="btn ghost" id="btn-export-order">レイヤ順をCSV出力</button>
+      </div>
+    </details>
+
+    <!-- 3) データ削除 -->
+    <details class="control">
+      <summary>3) データ削除（フィルタ）</summary>
+      <div class="row" style="display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+        <label>キー<input id="del-key" placeholder="例: YoutoName"/></label>
+        <label>一致
+          <select id="del-mode"><option value="exact">完全一致</option><option value="icontains">部分一致（大小無視）</option></select>
+        </label>
+        <label style="grid-column:1/-1;">値リスト（カンマ/改行）
+          <textarea id="del-values" rows="3"></textarea>
+        </label>
+        <label><input type="checkbox" id="del-trim" checked/> 前後空白</label>
+        <label><input type="checkbox" id="del-nfkc" checked/> NFKC</label>
+        <label><input type="checkbox" id="del-ignorecase" checked/> 大小無視</label>
+      </div>
+      <div class="row" style="margin-top:6px;">
+        <button class="btn" id="btn-del-preview">削除プレビュー</button>
+        <button class="btn" id="btn-del-exec" style="border-color:#b42318; color:#b42318;">削除を実行</button>
+        <button class="btn ghost" id="btn-undo">元に戻す</button>
+      </div>
+    </details>
+
+    <!-- 4) 既存スタイルの復元 -->
+    <details class="control">
+      <summary>4) 既存スタイルの復元</summary>
+      <div class="row"><button class="btn" id="btn-restore-style">復元して表示</button></div>
+    </details>
+
+    <!-- 5) 出力 -->
+    <details class="control">
+      <summary>5) 出力</summary>
+      <div class="row" style="margin-top:6px;">
+        <label><input type="checkbox" id="visible-only"/> 可視レイヤのみ</label>
+        <!-- ★ 追加：順序保持 -->
+        <label><input type="checkbox" id="preserve-order" checked/> レイヤ順で並べ替えて出力</label>
+      </div>
+      <div class="row" style="margin-top:6px;">
+        <button class="btn" id="btn-export-styled">スタイル書込GeoJSON</button>
+        <button class="btn" id="btn-export-percat">カテゴリ別GeoJSON</button>
+        <button class="btn" id="btn-export-dissolved">カテゴリ別dissolve</button>
+        <button class="btn" id="btn-export-legend">凡例CSV</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<!-- 凡例 -->
+<div class="legend" id="legend" aria-expanded="true">
+  <div class="drag-header" id="legend-head" title="ドラッグで移動 / ダブルクリックで最小化">
+    <span class="drag-title">凡例</span>
+    <span class="drag-btns"><button class="drag-btn" id="legend-min" aria-label="最小化/復元">最小化</button></span>
+  </div>
+  <div class="drag-body" id="legend-body">
+    <div id="legend-items" style="margin:6px 10px; font-size:12px;"></div>
+  </div>
+</div>
+
+<!-- ステータス -->
+<div class="status" id="status">Ready.</div>
+
+<script>
+(function(){
+  "use strict";
+  if(!window.L){
+    alert("Leaflet（./libs/leaflet/）が読み込めていません。パスをご確認ください。");
+  }
+  const $ = s => document.querySelector(s);
+  const statusEl = $('#status');
+  const legendItems = $('#legend-items');
+  const legendBody  = $('#legend-body');
+
+  /* ===== 地図 ===== */
+  const map = L.map('map', { center:[36.7,137.2], zoom:10 });
+  // --- ベースレイヤ（OSM / GSI淡色 / GSI白地図） ---
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    attribution:'© OpenStreetMap'
+  }).addTo(map);
+
+  // GSI 淡色
+  const gsiPale = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+    attribution:'地理院タイル（淡色）',
+    maxZoom: 18
+  });
+
+  // GSI 白地図
+  const gsiBlank = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/blank/{z}/{x}/{y}.png', {
+    attribution:'地理院タイル（白地図）',
+    maxZoom: 18
+  });
+
+  // レイヤ切替UI
+  L.control.layers(
+    { "OSM": osm, "GSI 淡色": gsiPale, "GSI 白地図": gsiBlank },
+    {},
+    { position:'topright', collapsed:false }
+  ).addTo(map);
+
+  // 初期描画安定化
+  setTimeout(()=> map.invalidateSize(), 0);
+
+  map.scrollWheelZoom.enable();
+  const canvasRenderer = L.canvas({ padding:0.2 });
+  const baseRoot  = L.layerGroup().addTo(map);
+  const layerRoot = L.layerGroup().addTo(map);
+
+  // パネル/凡例内のイベントは地図へ波及させない
+  L.DomEvent.disableScrollPropagation(document.getElementById('panel'));
+  L.DomEvent.disableClickPropagation (document.getElementById('panel'));
+  L.DomEvent.disableScrollPropagation(document.getElementById('legend'));
+  L.DomEvent.disableClickPropagation (document.getElementById('legend'));
+
+  function setStatus(s){ statusEl.textContent = s; }
+  function download(name, obj){
+    const blob = (obj instanceof Blob) ? obj : new Blob([obj], {type:'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+  }
+  function escapeHtml(x){ return String(x).replace(/[&<>\"']/g, s=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[s])); }
+  function basename(name){ return (name||'').split(/[\\/]/).pop(); }
+  function stem(name){ const b = basename(name); return b.replace(/\.(geojson|json|zip|shp|dbf|shx|prj)$/i,''); }
+  function timeStamp(){ return new Date().toISOString().replace(/[:.]/g, '').slice(0,15); }
+  function normStr(s,{trim=true,nfkc=true,lower=false}={}){ if(s==null) return ''; let t=String(s); if(nfkc&&t.normalize) t=t.normalize('NFKC'); if(trim) t=t.trim(); if(lower) t=t.toLowerCase(); return t; }
+  function parseList(text){ if(!text) return []; return text.split(/[\n,]+/).map(v=>v.trim()).filter(v=>v.length>0); }
+
+  /* ===== Data ===== */
+  let fcAll = { type:'FeatureCollection', features:[] };
+  let baseLayer = null;
+
+  // 色分類
+  let classifyMap = new Map();
+  let currentKey = '';
+  const defaultPalette = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
+
+  // レイヤ
+  let layerKey = '';
+  let layerMap = new Map();
+  let layerOrder = [];
+
+  // Undo
+  let undoBuffer = null;
+
+  // ★ 読み込み順安定化用のグローバル連番
+  let ordSeq = 0;
+
+  function styleOf(f){
+    const props=f.properties||{};
+    const val = (currentKey? props[currentKey]: null);
+    const col = (val!=null && classifyMap.has(String(val))) ? classifyMap.get(String(val))
+              : (props.FILL||props.fill||'#1976d2');
+    const sw = Number($('#stroke-width').value||2);
+    const so = Math.max(0,Math.min(1, Number($('#stroke-op').value||1)));
+    const fo = Math.max(0,Math.min(1, Number($('#fill-op').value||0.4)));
+    const weight = props.WIDTH ?? sw; const op = props.STROKE_OP ?? so; const fop = props.FILL_OP ?? fo;
+    return { color: col, weight, opacity: op, fillColor: col, fillOpacity: fop };
+  }
+
+  function refreshBase(){
+    if(baseLayer){ baseRoot.removeLayer(baseLayer); baseLayer=null; }
+    baseLayer = L.geoJSON(fcAll, {
+      renderer: canvasRenderer,
+      style: styleOf,
+      onEachFeature:(f,lyr)=>{ lyr.bindPopup(`<pre class="mono" style="margin:0">${JSON.stringify(f.properties||{}, null, 2)}</pre>`); }
+    }).addTo(baseRoot);
+    try{ map.fitBounds(baseLayer.getBounds(), { maxZoom:14 }); }catch{}
+    $('#feat-count').textContent = `${fcAll.features.length} features`;
+  }
+
+  /* ==== レイヤ分割・順序 ==== */
+
+  function clearLayers(clearList=true){
+    layerMap.forEach(o=>{ if(o.layer) layerRoot.removeLayer(o.layer); const p = o.pane && map.getPane(o.pane); if(p) p.remove(); });
+    layerMap.clear();
+    if(clearList) { layerOrder=[]; $('#order-list').innerHTML=''; }
+  }
+
+  function computeArea(f){ try{ return turf.area(f)||0; }catch{ return 0; } }
+
+  // ★ レイヤキーごとに集約しつつ、_layer_order の「ヒント」も拾う
+  function groupByLayerKey(){
+    const group = new Map();
+    for(const f of fcAll.features){
+      const props = f.properties || {};
+      const v = props[layerKey];
+      const k = String(v);
+      const arr = group.get(k) || [];
+      arr.push(f);
+      group.set(k, arr);
+    }
+    const g2 = new Map();
+    for(const [k,arr] of group.entries()){
+      const area = arr.reduce((s,f)=> s+computeArea(f),0);
+      // このレイヤに属するフィーチャの _layer_order の「最小値」を orderHint として採用
+      let orderHint = null;
+      for(const ft of arr){
+        const v = Number((ft.properties || {})._layer_order);
+        if(Number.isFinite(v)){
+          orderHint = (orderHint == null) ? v : Math.min(orderHint, v);
+        }
+      }
+      g2.set(k, {arr, area, orderHint});
+    }
+    return g2;
+  }
+
+  function buildLayers(){
+    clearLayers();
+    layerKey = $('#layer-key').value.trim();
+    if(!layerKey){ setStatus('レイヤキーを入力してください'); return; }
+
+    const group = groupByLayerKey();
+    const mode  = $('#order-init').value;
+
+    // groupByLayerKey から orderHint も引き継ぐ
+    const entries = [...group.entries()].map(([k,obj])=>({
+      k,
+      arr: obj.arr,
+      area: obj.area,
+      orderHint: obj.orderHint
+    }));
+
+    // ★ すべてのレイヤに _layer_order（orderHint）が入っていれば、それを優先
+    const hasOrderHintForAll = entries.length > 0 && entries.every(e => e.orderHint != null);
+
+    if(hasOrderHintForAll){
+      // _layer_order が小さいほど「手前側」という前提でソート（1 が最前面）
+      entries.sort((a,b)=>{
+        if(a.orderHint === b.orderHint){
+          return a.k.localeCompare(b.k,'ja');
+        }
+        return a.orderHint - b.orderHint;
+      });
+    } else {
+      // 既存の初期並びロジック
+      if(mode==='asc')       entries.sort((a,b)=> a.k.localeCompare(b.k,'ja'));
+      else if(mode==='desc') entries.sort((a,b)=> b.k.localeCompare(a.k,'ja'));
+      else if(mode==='area_desc') entries.sort((a,b)=> b.area - a.area);
+      else if(mode==='area_asc')  entries.sort((a,b)=> a.area - b.area);
+    }
+
+    const baseZ = 51000;
+    layerOrder  = entries.map(e=> e.k);
+
+    entries.forEach((e,idx)=>{
+      const safeKey  = e.k.replace(/[^\w.-]/g,'_');
+      const paneName = `pane_${idx}_${safeKey}`;
+      const pane     = map.createPane(paneName);
+
+      // ★ entries[0]（＝_layer_order が最小＝1 のレイヤ）に最大 zIndex を振る
+      pane.style.zIndex = String(baseZ + (entries.length - idx));
+
+      const lyr = L.geoJSON(
+        {type:'FeatureCollection',features:e.arr},
+        {
+          pane:paneName,
+          renderer:canvasRenderer,
+          style:styleOf,
+          onEachFeature:(f,layer)=>{
+            layer.bindPopup(
+              `<div class="mono">${escapeHtml(layerKey)}=${escapeHtml(e.k)}</div>` +
+              `<pre class="mono" style="margin:4px 0 0">${JSON.stringify(f.properties||{},null,2)}</pre>`
+            );
+          }
+        }
+      ).addTo(layerRoot);
+
+      layerMap.set(e.k, {
+        pane: paneName,
+        layer: lyr,
+        feats: e.arr,
+        area: e.area,
+        orderHint: e.orderHint
+      });
+    });
+
+    // フィット
+    try{
+      const any = entries.find(x=>x.arr.length)?.arr;
+      if(any){
+        const tmp = L.geoJSON({type:'FeatureCollection',features:any});
+        map.fitBounds(tmp.getBounds(),{maxZoom:14});
+        layerRoot.removeLayer(tmp);
+      }
+    }catch{}
+
+    buildOrderList();
+
+    if(hasOrderHintForAll){
+      setStatus(`レイヤ構築：${layerMap.size}レイヤ / 既存 _layer_order を優先して並び替え`);
+    }else{
+      setStatus(`レイヤ構築：${layerMap.size}レイヤ / 初期順=${mode}`);
+    }
+  }
+
+  function buildOrderList(){
+    const host=$('#order-list'); host.innerHTML='';
+    layerOrder.forEach((k)=>{
+      const div=document.createElement('div'); div.className='order-item'; div.draggable=true; div.dataset.key=k;
+      div.innerHTML=`<span class="order-key" title="${escapeHtml(k)}">${escapeHtml(k)}</span>
+        <span class="order-btns">
+          <button data-act="up" title="上へ">▲</button>
+          <button data-act="down" title="下へ">▼</button>
+          <button data-act="top" title="最前">⤴</button>
+          <button data-act="bottom" title="最後">⤵</button>
+        </span>`;
+      host.appendChild(div);
+    });
+    host.onclick = (e)=>{
+      const b=e.target.closest('button'); if(!b) return;
+      const item=e.target.closest('.order-item'); const k=item.dataset.key;
+      const i=layerOrder.indexOf(k); if(i<0) return; const act=b.dataset.act;
+      if(act==='up'&&i>0){ swap(i,i-1); }
+      else if(act==='down'&&i<layerOrder.length-1){ swap(i,i+1); }
+      else if(act==='top'){ layerOrder.splice(i,1); layerOrder.unshift(k); }
+      else if(act==='bottom'){ layerOrder.splice(i,1); layerOrder.push(k); }
+      buildOrderList();
+    };
+    let dragEl=null;
+    host.querySelectorAll('.order-item').forEach(el=>{
+      el.addEventListener('dragstart',()=>{ dragEl=el; el.classList.add('dragging'); });
+      el.addEventListener('dragend',()=>{ if(dragEl) el.classList.remove('dragging'); dragEl=null; });
+    });
+    host.addEventListener('dragover', e=>{
+      e.preventDefault();
+      const after=[...host.querySelectorAll('.order-item:not(.dragging)')].find(el=>{
+        const box=el.getBoundingClientRect(); const offset=e.clientY-box.top-box.height/2; return offset<0;
+      });
+      const cur=host.querySelector('.order-item.dragging'); if(!cur) return;
+      if(after) host.insertBefore(cur,after); else host.appendChild(cur);
+    });
+    host.addEventListener('drop', ()=>{
+      const keys=[...host.querySelectorAll('.order-item')].map(x=>x.dataset.key);
+      layerOrder=keys; buildOrderList();
+    });
+  }
+
+  function swap(i,j){ const t=layerOrder[i]; layerOrder[i]=layerOrder[j]; layerOrder[j]=t; }
+
+  function applyOrder(){
+    const baseZ=51000; const n=layerOrder.length;
+    layerOrder.forEach((k,idx)=>{
+      const o=layerMap.get(k); if(!o) return;
+      const pane=map.getPane(o.pane);
+      if(pane){
+        // ここも buildLayers と同じく「配列先頭が最前面」になるように
+        pane.style.zIndex = String(baseZ + (n - idx));
+      }
+    });
+    setStatus('レイヤ順を反映しました');
+  }
+
+  function exportOrderCsv(){
+    const lines=[['order','layer_key','total_area_sqm','feature_count']];
+    layerOrder.forEach((k,i)=>{
+      const o=layerMap.get(k)||{area:0,feats:[]};
+      lines.push([i+1,k,Math.round(o.area),(o.feats||[]).length]);
+    });
+    const csv=lines.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    download(`layer_order_${timeStamp()}.csv`, new Blob([csv],{type:'text/cv'}));
+  }
+
+  /* ==== 削除（フィルタ） ==== */
+
+  function buildDeletePredicate(){
+    const key=($('#del-key').value||$('#class-key').value||'').trim();
+    if(!key){ setStatus('削除キー（列名）を入力してください'); return null; }
+    const mode=$('#del-mode').value;
+    const vals=parseList($('#del-values').value);
+    const opt={ trim:$('#del-trim').checked, nfkc:$('#del-nfkc').checked, lower:$('#del-ignorecase').checked };
+    if(vals.length===0){ setStatus('削除する値を入力してください'); return null; }
+    const nVals=vals.map(v=>normStr(v,opt));
+    if(mode==='exact'){ const set=new Set(nVals); return props=> set.has(normStr((props||{})[key],opt)); }
+    else { return props=> { const t=normStr((props||{})[key],opt); return nVals.some(v=>t.includes(v)); }; }
+  }
+
+  function previewDelete(){
+    const pred=buildDeletePredicate(); if(!pred) return;
+    let hit=0; for(const f of fcAll.features){ try{ if(pred(f.properties)) hit++; }catch{} }
+    setStatus(`削除プレビュー：${hit} 件（全 ${fcAll.features.length}）`); return hit;
+  }
+
+  function execDelete(){
+    const pred=buildDeletePredicate(); if(!pred) return;
+    undoBuffer={ type:'FeatureCollection', features: fcAll.features.map(f=> JSON.parse(JSON.stringify(f))) };
+    const before=fcAll.features.length;
+    fcAll.features=fcAll.features.filter(f=>{ try{ return !pred(f.properties);}catch{ return true; } });
+    const removed=before-fcAll.features.length; refreshBase();
+    setStatus(`削除：${removed} 件（残 ${fcAll.features.length}）`);
+  }
+
+  function undoOnce(){ if(!undoBuffer){ setStatus('直前の状態がありません'); return; } fcAll=undoBuffer; undoBuffer=null; refreshBase(); setStatus('元に戻しました'); }
+
+  /* ==== 既存スタイルの復元・分類 ==== */
+
+  function tryRestoreStyle(){
+    classifyMap.clear();
+    const key=$('#class-key').value.trim(); currentKey = key || currentKey;
+    const sw=$('#stroke-width'); const so=$('#stroke-op'); const fo=$('#fill-op');
+    for(const f of fcAll.features){
+      const p=f.properties||{}; const val= key ? p[key] : undefined;
+      const stroke=p.STROKE||p.stroke; const fill=p.FILL||p.fill;
+      const sopacity=p.STROKE_OP ?? p['stroke-opacity'] ?? p.opacity;
+      const fopacity=p.FILL_OP   ?? p['fill-opacity'];
+      if(val!=null){ const c=fill||stroke; if(c&&!classifyMap.has(String(val))) classifyMap.set(String(val),c); }
+      if(sopacity!=null) so.value=String(Math.max(0,Math.min(1,Number(sopacity))));
+      if(fopacity!=null) fo.value=String(Math.max(0,Math.min(1,Number(fopacity))));
+      if(p.WIDTH!=null)  sw.value=String(Number(p.WIDTH));
+    }
+    if(classifyMap.size===0 && currentKey){
+      const vals=[...new Set(fcAll.features.map(f=>(f.properties||{})[currentKey]))];
+      vals.forEach((v,i)=> classifyMap.set(String(v), defaultPalette[i%defaultPalette.length]));
+    }
+    renderClassTableFromMap();
+    updateLegend();
+    refreshBase();
+    setStatus('既存スタイルを復元（可能な範囲）');
+  }
+
+  function applyDefaults(){
+    $('#stroke-width').value='2'; $('#stroke-op').value='1'; $('#fill-op').value='0.4';
+    buildKeyGuess();
+    const key=$('#class-key').value.trim();
+    if(key && fcAll.features.length){ buildClassifyTable(); updateLegend(); } else { classifyMap.clear(); }
+    refreshBase();
+    setStatus('デフォルトを適用しました');
+  }
+
+  function buildClassifyTable(){
+    currentKey=$('#class-key').value.trim();
+    if(!currentKey){ setStatus('分類キーを入力してください'); return; }
+    const cntMap=new Map();
+    for(const f of fcAll.features){ const v=(f.properties||{})[currentKey]; const k=String(v); cntMap.set(k,(cntMap.get(k)||0)+1); }
+    const uniq=[...cntMap.keys()].sort();
+    classifyMap=new Map();
+    uniq.forEach((v,i)=> classifyMap.set(String(v), defaultPalette[i%defaultPalette.length]) );
+    renderClassTableFromMap(cntMap);
+    setStatus(`分類テーブル生成：${uniq.length}カテゴリ`);
+  }
+
+  function renderClassTableFromMap(cntMap=null){
+    const wrap=$('#class-table-wrap');
+    const rows=[];
+    const entries=[...classifyMap.entries()];
+    entries.forEach(([v,c])=>{
+      rows.push(`<tr>
+        <td>${escapeHtml(v)}</td>
+        <td><input type="color" value="${c}" data-k="${encodeURIComponent(v)}" class="colpick"/></td>
+        <td style="text-align:right">${cntMap? (cntMap.get(String(v))||0) : ''}</td>
+      </tr>`);
+    });
+    wrap.innerHTML=`<table class="table"><thead><tr><th>値 (${currentKey||'-'})</th><th>色</th><th>件数</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+    wrap.querySelectorAll('.colpick').forEach(inp=>{
+      inp.addEventListener('input',e=>{ const key=decodeURIComponent(e.target.dataset.k); classifyMap.set(String(key), e.target.value); });
+    });
+  }
+
+  function updateLegend(){
+    legendItems.innerHTML='';
+    [...classifyMap.entries()].forEach(([k,c])=>{
+      const div=document.createElement('div');
+      div.style.display='flex'; div.style.alignItems='center'; div.style.gap='8px'; div.style.margin='2px 0';
+      div.innerHTML=`<span style="display:inline-block;width:14px;height:14px;border:1px solid #cbd5e1;background:${c};"></span> <span>${escapeHtml(k)}</span>`;
+      legendItems.appendChild(div);
+    });
+    resizeLegend();
+  }
+
+  function buildKeyGuess(){
+    const f=fcAll.features.find(x=>x&&x.properties&&Object.keys(x.properties).length); if(!f) return;
+    const keys=Object.keys(f.properties);
+    const prefer=['YoutoName','用途','zone','category','class','name','_src','Cityname','A29_001'];
+    const hit=prefer.find(k=>keys.includes(k));
+    if(hit){ $('#class-key').value=hit; if(!$('#layer-key').value) $('#layer-key').value=hit; }
+  }
+
+  /* ==== キー統合 ==== */
+
+  function unifyOptions(){ return {
+    target:$('#unify-target').value.trim(),
+    srcList:parseList($('#unify-sources').value),
+    fallback:$('#unify-fallback').value ?? '',
+    ci:$('#unify-ci').checked,
+    useNFKC:$('#unify-nfkc').checked,
+    useTrim:$('#unify-trim').checked
+  }; }
+
+  function pickValueFromSources(props,srcList,ci){
+    if(!props) return {value:'',sourceKey:''};
+    const cand = Object.keys(props);
+    for(const k of cand){
+      const kCmp = ci ? k.toLowerCase() : k;
+      if(srcList.includes(kCmp)){
+        const v = props[k];
+        if(v!=null && String(v).length>0) return { value:String(v), sourceKey:k };
+      }
+    }
+    return {value:'',sourceKey:''};
+  }
+
+  function normalizeValue(v,{useTrim,useNFKC}){ return normStr(v, {trim:useTrim, nfkc:useNFKC, lower:false}); }
+
+  function previewUnify(){
+    const {target,srcList,fallback,ci,useNFKC,useTrim}=unifyOptions();
+    if(!target){ setStatus('統合キー名を入力してください'); return; }
+    if(srcList.length===0){ setStatus('コピー元キー名を1つ以上入力してください'); return; }
+    const srcKeys= ci? srcList.map(k=>k.toLowerCase()) : srcList.slice();
+    const N=fcAll.features.length;
+    let filled=0, empty=0, fallbackUsed=0;
+    const perSrc=new Map(); const valueTop=new Map(); const missingReason={noKeyHit:0,valueEmpty:0};
+    for(const f of fcAll.features){
+      const p=f.properties||(f.properties={});
+      const {value,sourceKey}=pickValueFromSources(p,srcKeys,ci);
+      let val=value; let usedFallback=false;
+      if(val===''&&fallback!==''){val=fallback; usedFallback=true;}
+      const norm=normalizeValue(val,{useTrim,useNFKC});
+      if(norm===''){ empty++; if(value==='') missingReason.noKeyHit++; else missingReason.valueEmpty++; }
+      else{ filled++; if(usedFallback) fallbackUsed++; const srcName= usedFallback? '(fallback)': (sourceKey||'(unknown)'); perSrc.set(srcName,(perSrc.get(srcName)||0)+1); valueTop.set(norm,(valueTop.get(norm)||0)+1); }
+    }
+    const topValues=[...valueTop.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const orderedSrc=[...perSrc.entries()];
+    const html=`
+      <div class="grid3"><div><b>総件数</b><div class="muted">${N}</div></div><div><b>値あり</b><div class="muted">${filled}</div></div><div><b>空</b><div class="muted">${empty}</div></div></div>
+      <div class="grid2" style="margin-top:8px;"><div><b>fallback使用</b><div class="muted">${fallbackUsed}</div></div><div><b>ユニーク値数</b><div class="muted">${valueTop.size}</div></div></div>
+      <div style="margin-top:10px;">
+        <b>未取得の内訳</b>
+        <table class="table"><thead><tr><th>理由</th><th>件数</th></tr></thead>
+        <tbody><tr><td>コピー元キーが見つからない</td><td>${missingReason.noKeyHit}</td></tr><tr><td>見つかったが値が空</td><td>${missingReason.valueEmpty}</td></tr></tbody></table>
+      </div>
+      <div style="margin-top:10px;">
+        <b>コピー元キー別ヒット件数</b>
+        <table class="table"><thead><tr><th>コピー元キー</th><th>件数</th></tr></thead>
+        <tbody>${orderedSrc.map(([k,c])=>`<tr><td>${escapeHtml(k)}</td><td>${c}</td></tr>`).join('')||`<tr><td colspan="2">（該当なし）</td></tr>`}</tbody></table>
+      </div>
+      <div style="margin-top:10px;">
+        <b>値の上位（Top5）</b>
+        <table class="table"><thead><tr><th>値</th><th>件数</th></tr></thead>
+        <tbody>${topValues.map(([v,c])=>`<tr><td>${escapeHtml(v)}</td><td>${c}</td></tr>`).join('')||`<tr><td colspan="2">（該当なし）</td></tr>`}</tbody></table>
+      </div>`;
+    const box=$('#unify-preview'); box.style.display='block'; box.innerHTML=html; setStatus('統合プレビューを作成しました');
+  }
+
+  function unifyKeys(){
+    const {target,srcList,fallback,ci,useNFKC,useTrim}=unifyOptions();
+    if(!target){ setStatus('統合キー名を入力してください'); return; }
+    if(srcList.length===0){ setStatus('コピー元キー名を1つ以上入力してください'); return; }
+    const srcKeys= ci? srcList.map(k=>k.toLowerCase()) : srcList.slice();
+    let filled=0, empty=0;
+    for(const f of fcAll.features){
+      const p=f.properties||(f.properties={});
+      const {value}=pickValueFromSources(p,srcKeys,ci);
+      let val=value; if(val===''&&fallback!=='') val=fallback;
+      val=normalizeValue(val,{useTrim,useNFKC});
+      if(val==='') empty++; else filled++;
+      p[target]=val;
+    }
+    $('#class-key').value=target; buildClassifyTable(); updateLegend(); refreshBase();
+    setStatus(`キー統合：${filled}件に値を設定（空=${empty}）。分類キーを「${target}」へ。`);
+  }
+
+  /* ==== カテゴリ統合 ==== */
+
+  function mergeOptions(){ return { ci:$('#merge-ci').checked, nfkc:$('#merge-nfkc').checked, trim:$('#merge-trim').checked }; }
+
+  function parseMergeRulesText(text,{ci,nfkc,trim}){
+    const rules=[]; if(!text) return rules;
+    const lines=text.split(/\n+/);
+    for(let raw of lines){
+      const line=raw.trim(); if(!line || line.startsWith('#')) continue;
+      const m=line.split(/\s*(?:=>|⇒|→)\s*/);
+      if(m.length<2) continue;
+      const left=m[0], right=m.slice(1).join('=>');
+      const targets = right.trim();
+      const aliases = left.split(/[,，、\s]+/).map(s=>s.trim()).filter(Boolean);
+      const norm = v => normStr(v,{trim, nfkc, lower:ci});
+      const to = norm(targets); if(!to) continue;
+      aliases.forEach(a=>{
+        const from=norm(a); if(from && from!==to) rules.push({from, to, fromRaw:a, toRaw:targets});
+      });
+    }
+    return rules;
+  }
+
+  function buildValueCount(){
+    const key=$('#class-key').value.trim(); const map=new Map();
+    for(const f of fcAll.features){ const v=(f.properties||{})[key]; const k=String(v); map.set(k,(map.get(k)||0)+1); }
+    return map;
+  }
+
+  function mergeTemplateFromLegend(){
+    if(!currentKey || classifyMap.size===0){ setStatus('先に分類テーブル/復元を実行してください'); return; }
+    const lines=[...classifyMap.keys()].map(v=>`${v} => ${v}`).join('\n');
+    $('#merge-rules').value=lines;
+    setStatus('雛形を生成しました');
+  }
+
+  function previewMerge(){
+    const key=$('#class-key').value.trim(); if(!key){ setStatus('分類キーを設定してください'); return; }
+    const opts=mergeOptions();
+    const rules=parseMergeRulesText($('#merge-rules').value, opts);
+    if(rules.length===0){ setStatus('有効な統合ルールがありません'); return; }
+    const cnt = buildValueCount();
+    const mapRules=new Map(); rules.forEach(r=> mapRules.set(r.from, r.to));
+    const norm=v=>normStr(v,{trim:opts.trim,nfkc:opts.nfkc,lower:opts.ci});
+    let totalChanges=0;
+    const perRule=[];
+    const allValues=[...cnt.keys()];
+    for(const r of rules){
+      const hitCount = allValues.reduce((s,val)=> s + ((norm(val)===r.from)? (cnt.get(val)||0):0), 0);
+      if(hitCount>0){ totalChanges+=hitCount; perRule.push({from:r.fromRaw, to:r.toRaw, count:hitCount}); }
+    }
+    const html=`
+      <div class="grid3">
+        <div><b>総フィーチャ</b><div class="muted">${fcAll.features.length}</div></div>
+        <div><b>変更見込み</b><div class="muted">${totalChanges}</div></div>
+        <div><b>ルール数</b><div class="muted">${rules.length}</div></div>
+      </div>
+      <div style="margin-top:10px;">
+        <b>ルール別ヒット件数</b>
+        <table class="table"><thead><tr><th>別名</th><th>正式名</th><th>件数</th></tr></thead>
+        <tbody>${perRule.map(r=>`<tr><td>${escapeHtml(r.from)}</td><td>${escapeHtml(r.to)}</td><td>${r.count}</td></tr>`).join('')||`<tr><td colspan="3">（該当なし）</td></tr>`}</tbody></table>
+      </div>`;
+    const box=$('#merge-preview'); box.style.display='block'; box.innerHTML=html;
+    setStatus('カテゴリ統合プレビューを作成しました');
+  }
+
+  function applyMerge(){
+    const key=$('#class-key').value.trim(); if(!key){ setStatus('分類キーを設定してください'); return; }
+    const opts=mergeOptions();
+    const rules=parseMergeRulesText($('#merge-rules').value, opts);
+    if(rules.length===0){ setStatus('有効な統合ルールがありません'); return; }
+    undoBuffer={ type:'FeatureCollection', features: fcAll.features.map(f=> JSON.parse(JSON.stringify(f))) };
+    const beforeColors=new Map(classifyMap);
+    const mapRules=new Map(); rules.forEach(r=> mapRules.set(r.from, r.to));
+    const norm=v=>normStr(v,{trim:opts.trim,nfkc:opts.nfkc,lower:opts.ci});
+    let changed=0;
+    for(const f of fcAll.features){
+      const p=f.properties||(f.properties={});
+      const v=p[key]; const nv=norm(v);
+      const to=mapRules.get(nv);
+      if(to!=null && to!==nv){
+        const toRaw=rules.find(r=>r.to===to)?.toRaw ?? to;
+        if(String(v)!==toRaw){ p[key]=toRaw; changed++; }
+      }
+    }
+    const cntMap=new Map(); for(const f of fcAll.features){ const v=(f.properties||{})[key]; const s=String(v); cntMap.set(s,(cntMap.get(s)||0)+1); }
+    const uniq=[...cntMap.keys()].sort();
+    const newMap=new Map();
+    for(const val of uniq){
+      let col=beforeColors.get(val);
+      if(!col){
+        const parsed = parseMergeRulesText($('#merge-rules').value, opts);
+        for(const {fromRaw,toRaw} of parsed){
+          if(toRaw===val && beforeColors.get(fromRaw)){ col=beforeColors.get(fromRaw); break; }
+        }
+      }
+      newMap.set(val, col || defaultPalette[newMap.size % defaultPalette.length]);
+    }
+    classifyMap = new Map(newMap);
+    currentKey = key;
+    renderClassTableFromMap(cntMap);
+    updateLegend();
+    refreshBase();
+    setStatus(`カテゴリ統合：${changed} 件更新（分類キー=${key}）`);
+  }
+
+  /* ==== 色CSV：値→色マップ読込 ==== */
+
+  function csvOpts(){ return {
+    ci:$('#csv-ci').checked, nfkc:$('#csv-nfkc').checked, trim:$('#csv-trim').checked,
+    ignoreHeader:$('#csv-ignore-header').checked,
+    mode: document.querySelector('input[name="csv-mode"]:checked')?.value || 'merge'
+  }; }
+
+  function readFileText(file){
+    return new Promise((resolve,reject)=>{
+      const r=new FileReader();
+      r.onload=()=> resolve(r.result);
+      r.onerror=reject;
+      r.readAsText(file);
+    });
+  }
+
+  function parseColorCsv(text, {ignoreHeader=true}={}){
+    const lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+    const rows=[];
+    for(let i=0;i<lines.length;i++){
+      const line=lines[i]; if(!line) continue;
+      const cells=[];
+      let cur=''; let inQ=false;
+      for(let j=0;j<line.length;j++){
+        const ch=line[j];
+        if(inQ){
+          if(ch==='"' && line[j+1]==='"'){ cur+='"'; j++; }
+          else if(ch==='\"'){ inQ=false; }
+          else { cur+=ch; }
+        }else{
+          if(ch==='\"'){ inQ=true; }
+          else if(ch===','){ cells.push(cur); cur=''; }
+          else { cur+=ch; }
+        }
+      }
+      cells.push(cur);
+      rows.push(cells);
+    }
+    const start = (ignoreHeader && rows.length>0)? 1: 0;
+    const out=[];
+    for(let i=start;i<rows.length;i++){
+      const c=rows[i]; if(!c || c.length<2) continue;
+      const val=(c[0]??'').trim();
+      const col=(c[1]??'').trim();
+      if(!val) continue;
+      if(!/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(col)) continue;
+      out.push([val, col]);
+    }
+    return out;
+  }
+
+  function previewColorCsvPairs(pairs,opts){
+    const norm=v=>normStr(v,{trim:opts.trim,nfkc:opts.nfkc,lower:opts.ci});
+    const mapNormToColor=new Map();
+    for(const [v,c] of pairs){ const nv=norm(v); if(nv) mapNormToColor.set(nv,c); }
+
+    let willUpdate=0, willCreate=0;
+    const seen = new Set([...classifyMap.keys()].map(k=>norm(k)));
+    const existingNormToKey=new Map();
+    for(const k of classifyMap.keys()){ existingNormToKey.set(norm(k), k); }
+
+    mapNormToColor.forEach((_,nv)=>{
+      if(seen.has(nv)) willUpdate++; else willCreate++;
+    });
+
+    const html=`
+      <div class="grid3">
+        <div><b>CSV行（有効）</b><div class="muted">${pairs.length}</div></div>
+        <div><b>更新対象（既存キー）</b><div class="muted">${willUpdate}</div></div>
+        <div><b>新規作成（分類キーに値が未登録）</b><div class="muted">${willCreate}</div></div>
+      </div>`;
+    const box=$('#color-preview'); box.style.display='block'; box.innerHTML=html;
+    setStatus('色CSVプレビューを作成しました');
+  }
+
+  function applyColorCsvPairs(pairs,opts){
+    if(!currentKey){
+      const ck=$('#class-key').value.trim();
+      if(!ck){ setStatus('先に「分類キー」を指定してください'); return; }
+      currentKey=ck;
+    }
+    if(classifyMap.size===0){ buildClassifyTable(); }
+
+    const norm=v=>normStr(v,{trim:opts.trim,nfkc:opts.nfkc,lower:opts.ci});
+
+    if(opts.mode==='replace'){
+      const valuesInData=new Set(fcAll.features.map(f=>String((f.properties||{})[currentKey])));
+      const newMap=new Map();
+      for(const [v,c] of pairs){
+        const nv=norm(v);
+        const hit=[...valuesInData].find(x=>norm(x)===nv);
+        if(hit!=null) newMap.set(hit, c);
+      }
+      classifyMap = newMap;
+    }else{
+      const existingNormToKey=new Map();
+      for(const k of classifyMap.keys()){ existingNormToKey.set(norm(k), k); }
+      for(const [v,c] of pairs){
+        const nv=norm(v);
+        const ek = existingNormToKey.get(nv);
+        if(ek){ classifyMap.set(ek, c); }
+        else{
+          const hit=fcAll.features.find(f=> norm((f.properties||{})[currentKey])===nv );
+          if(hit){ const real=String((hit.properties||{})[currentKey]); classifyMap.set(real, c); }
+        }
+      }
+    }
+
+    const cnt = new Map();
+    for(const f of fcAll.features){ const v=(f.properties||{})[currentKey]; const k=String(v); cnt.set(k,(cnt.get(k)||0)+1); }
+    renderClassTableFromMap(cnt);
+    updateLegend();
+    if(layerMap.size){ layerMap.forEach(o=>o.layer.setStyle(styleOf)); } else { refreshBase(); }
+    setStatus(`色CSVを${opts.mode==='replace'?'置換':'マージ'}適用しました`);
+  }
+
+  /* ==== 出力 ==== */
+
+  function collectTargetFeatures(){
+    if($('#visible-only').checked && layerMap.size){
+      const feats=[];
+      layerOrder.forEach(k=>{
+        const o=layerMap.get(k);
+        if(!o) return;
+        if(map.hasLayer(o.layer)){
+          o.layer.eachLayer(l=>{ if(l.feature) feats.push(l.feature); });
+        }
+      });
+      return feats;
+    }
+    return fcAll.features;
+  }
+
+  // ★ レイヤ順で並べ替えた配列を作る（レイヤ内は読み込み順 _ord）
+  function collectTargetFeaturesOrdered(){
+    const preserve = $('#preserve-order').checked;
+    if(!preserve || !layerMap.size || !layerOrder.length){
+      return collectTargetFeatures();
+    }
+    const visibleOnly = $('#visible-only').checked;
+    const feats = [];
+    for(const k of layerOrder){
+      const o = layerMap.get(k);
+      if(!o) continue;
+      if(visibleOnly && !map.hasLayer(o.layer)) continue;
+      const arr = [...(o.feats||[])].sort((a,b)=>{
+        const ao = (a.properties&&a.properties._ord)||0;
+        const bo = (b.properties&&b.properties._ord)||0;
+        return ao - bo;
+      });
+      feats.push(...arr);
+    }
+    return feats;
+  }
+
+  // ★ プロパティへレイヤ情報/順序を書き戻す
+  function writeBackStyleProps(f){
+    const sw=Number($('#stroke-width').value||2);
+    const so=Math.max(0,Math.min(1,Number($('#stroke-op').value||1)));
+    const fo=Math.max(0,Math.min(1,Number($('#fill-op').value||0.4)));
+    const props=f.properties||(f.properties={});
+    if(currentKey){
+      const v=props[currentKey];
+      const col= (v!=null && classifyMap.has(String(v))) ? classifyMap.get(String(v)) : '#1976d2';
+      props.STROKE=col; props.FILL=col; props.WIDTH=sw; props.STROKE_OP=so; props.FILL_OP=fo;
+    }
+    if(layerKey){
+      const lk = String(props[layerKey] ?? '');
+      const idx = layerOrder.indexOf(lk);
+      if(idx>=0){
+        props.ZINDEX = (layerOrder.length - idx); // 数字の大きいものが上
+        props._layer = lk;
+        props._layer_order = (idx + 1);          // 1 が最前面
+      }
+    }
+    if(props._ord != null){
+      props._seq = props._ord;
+    }
+    return f;
+  }
+
+  function exportStyledSingle(){
+    const src = collectTargetFeaturesOrdered();
+    const feats = src.map(f=>writeBackStyleProps(JSON.parse(JSON.stringify(f))));
+    const out={type:'FeatureCollection',features:feats};
+    download(`styled_${timeStamp()}.geojson`, JSON.stringify(out));
+  }
+
+  function splitByCategory(){
+    if(!currentKey){ setStatus('分類キーを設定してください'); return; }
+    const source=collectTargetFeaturesOrdered();
+    const groups=new Map();
+    for(const f of source){
+      const v=(f.properties||{})[currentKey];
+      const k=String(v);
+      const arr=groups.get(k)||[];
+      arr.push(writeBackStyleProps(JSON.parse(JSON.stringify(f))));
+      groups.set(k,arr);
+    }
+    for(const [k,arr] of groups.entries()){
+      const out={type:'FeatureCollection',features:arr};
+      const safe=k.replace(/[^\p{L}\p{N}_.-]+/gu,'_').slice(0,60)||'null';
+      download(`split_${currentKey}_${safe}.geojson`, JSON.stringify(out));
+    }
+    setStatus(`分割エクスポート：${groups.size}ファイル`);
+  }
+
+  function dissolveByCategory(){
+    if(!currentKey){ setStatus('分類キーを設定してください'); return; }
+    const source=collectTargetFeaturesOrdered();
+    const groups=new Map();
+    for(const f of source){
+      const v=(f.properties||{})[currentKey];
+      const k=String(v);
+      const arr=groups.get(k)||[];
+      arr.push(f);
+      groups.set(k,arr);
+    }
+    for(const [k,arr] of groups.entries()){
+      let merged=null; const polys=arr.filter(x=>x.geometry&&(x.geometry.type==='Polygon'||x.geometry.type==='MultiPolygon'));
+      if(polys.length){
+        try{ merged=polys.slice(1).reduce((m,f)=>turf.union(m,f)||m,polys[0]); }
+        catch{
+          const coords=[]; for(const p of polys){ const g=p.geometry; if(g.type==='Polygon') coords.push(g.coordinates); else if(g.type==='MultiPolygon') coords.push(...g.coordinates); }
+          merged={ type:'Feature', properties:{}, geometry:{ type:'MultiPolygon', coordinates:coords } };
+        }
+      }
+      const others=arr.filter(x=>!x.geometry||(x.geometry.type!=='Polygon'&&x.geometry.type!=='MultiPolygon'));
+      const outFeats=[];
+      if(merged){
+        merged.properties=Object.assign({},merged.properties,{[currentKey]:k});
+        writeBackStyleProps(merged);
+        outFeats.push(merged);
+      }
+      outFeats.push(...others.map(f=>{ const g=JSON.parse(JSON.stringify(f)); writeBackStyleProps(g); return g; }));
+      const out={type:'FeatureCollection',features:outFeats};
+      const safe=k.replace(/[^\p{L}\p{N}_.-]+/gu,'_').slice(0,60)||'null';
+      download(`dissolve_${currentKey}_${safe}.geojson`, JSON.stringify(out));
+    }
+    setStatus('カテゴリ別 dissolve を出力しました');
+  }
+
+  function exportLegendCsv(){
+    const sw=Number($('#stroke-width').value||2);
+    const so=Number($('#stroke-op').value||1);
+    const fo=Number($('#fill-op').value||0.4);
+    const lines=[['key','value','color','WIDTH','STROKE_OP','FILL_OP']];
+    for(const [k,c] of classifyMap.entries()){ lines.push([currentKey,k,c,sw,so,fo]); }
+    const csv=lines.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    download(`legend_${currentKey}_${timeStamp()}.csv`, new Blob([csv],{type:'text/csv'}));
+  }
+
+  /* ==== 読み込み ==== */
+
+  function flattenFC(gj){
+    const out=[]; const pushF=f=>{ if(!f||!f.geometry) return; out.push(f); };
+    if(!gj) return out;
+    if(gj.type==='Feature') pushF(gj);
+    else if(gj.type==='FeatureCollection') (gj.features||[]).forEach(pushF);
+    else if(gj.type && gj.coordinates) out.push({type:'Feature',properties:{},geometry:gj});
+    return out;
+  }
+
+  async function handleFiles(files){
+    const append=$('#append-mode').checked;
+    const tagSrc=$('#tag-source').checked;
+    setStatus(`読込（${files.length}件）… モード=${append?'追加':'置換'}`);
+    const feats= append? [...fcAll.features] : [];
+    let added=0;
+    for(const f of files){
+      try{
+        const name=f.name||''; const tag=stem(name);
+        if(/\.(geo)?json$/i.test(name)){
+          const txt=await readFileText(f); const gj=JSON.parse(txt); const arr=flattenFC(gj);
+          for(const ft of arr){
+            const p=ft.properties||(ft.properties={});
+            if(p._ord==null) p._ord=++ordSeq;
+            if(tagSrc && p._src==null) p._src=tag;
+          }
+          feats.push(...arr); added+=arr.length;
+        } else if(/\.zip$/i.test(name)){
+          const ab=await f.arrayBuffer(); const gj=await shp(ab);
+          const arr=flattenFC(gj);
+          for(const ft of arr){
+            const p=ft.properties||(ft.properties={});
+            if(p._ord==null) p._ord=++ordSeq;
+            if(tagSrc && p._src==null) p._src=tag;
+          }
+          feats.push(...arr); added+=arr.length;
+        }
+      }catch(e){ console.error('load failed', f?.name, e); }
+    }
+    fcAll={type:'FeatureCollection',features:feats};
+    setStatus(`読込完了：${added}件追加（合計 ${feats.length}件）`);
+    refreshBase();
+    if(!$('#class-key').value) buildKeyGuess();
+    if(!$('#layer-key').value && fcAll.features[0]?.properties?._src){ $('#layer-key').value='_src'; }
+  }
+
+  // ファイル選択
+  $('#file').addEventListener('change',e=>{ const files=Array.from(e.target.files||[]); handleFiles(files); e.target.value=''; });
+
+  // ドロップ（パネルへ）
+  const panelEl = document.getElementById('panel');
+  panelEl.addEventListener('dragover',e=>{ e.preventDefault(); panelEl.classList.add('drop'); });
+  panelEl.addEventListener('dragleave',e=>{ e.preventDefault(); panelEl.classList.remove('drop'); });
+  panelEl.addEventListener('drop',e=>{ e.preventDefault(); panelEl.classList.remove('drop'); const files=Array.from(e.dataTransfer.files||[]); handleFiles(files); });
+
+  // ボタン類
+  $('#btn-default').addEventListener('click', applyDefaults);
+  $('#btn-clear').addEventListener('click', ()=>{
+    fcAll={type:'FeatureCollection',features:[]}; classifyMap.clear(); currentKey='';
+    if(baseLayer){ baseRoot.removeLayer(baseLayer); baseLayer=null; }
+    clearLayers(); $('#class-table-wrap').innerHTML=''; legendItems.innerHTML='';
+    $('#unify-preview').style.display='none'; $('#unify-preview').innerHTML='';
+    $('#merge-preview').style.display='none'; $('#merge-preview').innerHTML='';
+    $('#color-preview').style.display='none'; $('#color-preview').innerHTML='';
+    $('#feat-count').textContent = '0 features';
+    resizeLegend();
+    setStatus('クリアしました');
+  });
+  $('#btn-unify-preview').addEventListener('click', previewUnify);
+  $('#btn-unify').addEventListener('click', unifyKeys);
+  $('#btn-merge-template').addEventListener('click', mergeTemplateFromLegend);
+  $('#btn-merge-preview').addEventListener('click', previewMerge);
+  $('#btn-merge-apply').addEventListener('click', applyMerge);
+  $('#btn-classify').addEventListener('click', buildClassifyTable);
+  $('#btn-apply-style').addEventListener('click', ()=>{ if(layerMap.size){ layerMap.forEach(o=>o.layer.setStyle(styleOf)); } else { refreshBase(); } setStatus('地図に反映しました'); });
+  $('#btn-make-legend').addEventListener('click', updateLegend);
+  $('#btn-restore-style').addEventListener('click', tryRestoreStyle);
+  $('#btn-build-layers').addEventListener('click', buildLayers);
+  $('#btn-clear-layers').addEventListener('click', ()=>{ clearLayers(); setStatus('レイヤを解除しました'); });
+  $('#btn-apply-order').addEventListener('click', applyOrder);
+  $('#btn-export-order').addEventListener('click', exportOrderCsv);
+  $('#btn-del-preview').addEventListener('click', previewDelete);
+  $('#btn-del-exec').addEventListener('click', execDelete);
+  $('#btn-undo').addEventListener('click', undoOnce);
+  $('#btn-export-styled').addEventListener('click', exportStyledSingle);
+  $('#btn-export-percat').addEventListener('click', splitByCategory);
+  $('#btn-export-dissolved').addEventListener('click', dissolveByCategory);
+  $('#btn-export-legend').addEventListener('click', exportLegendCsv);
+
+  // 色CSVプレビュー/適用
+  let lastCsvPairs = [];
+  $('#btn-color-preview').addEventListener('click', async ()=>{
+    const f = $('#color-csv').files?.[0];
+    if(!f){ setStatus('CSVファイルを選択してください'); return; }
+    const txt = await readFileText(f);
+    const pairs = parseColorCsv(txt, {ignoreHeader: $('#csv-ignore-header').checked});
+    if(pairs.length===0){ setStatus('有効な「値, #RRGGBB」行が見つかりません'); $('#color-preview').style.display='none'; return; }
+    lastCsvPairs = pairs;
+    previewColorCsvPairs(pairs, csvOpts());
+  });
+  $('#btn-color-apply').addEventListener('click', async ()=>{
+    if(!lastCsvPairs.length){
+      const f = $('#color-csv').files?.[0];
+      if(!f){ setStatus('CSVファイルを選択してください'); return; }
+      const txt = await readFileText(f);
+      lastCsvPairs = parseColorCsv(txt, {ignoreHeader: $('#csv-ignore-header').checked});
+      if(!lastCsvPairs.length){ setStatus('有効な「値, #RRGGBB」行が見つかりません'); return; }
+    }
+    applyColorCsvPairs(lastCsvPairs, csvOpts());
+  });
+
+  /* —— 凡例のオートリサイズ —— */
+  function resizeLegend(){
+    const minVH = 12;
+    const maxVH = 45;
+    const itemH = legendItems.scrollHeight + 12;
+    const vh = Math.max(minVH, Math.min(maxVH, (itemH / window.innerHeight) * 100));
+    legendBody.style.maxHeight = vh + 'vh';
+  }
+  window.addEventListener('resize', resizeLegend);
+
+  /* —— 最小化＆ドラッグ —— */
+  function makeDraggableFixed(box, head, storageKey, defaultPos){
+    let saved=null;
+    try{ saved = JSON.parse(localStorage.getItem(storageKey)||'null'); }catch{}
+    const validNum = v => (typeof v==='number' && isFinite(v));
+    const initX = validNum(saved?.x) ? saved.x : defaultPos.x;
+    const initY = validNum(saved?.y) ? saved.y : defaultPos.y;
+    const initMin = (typeof saved?.min==='boolean') ? saved.min : false;
+
+    box.style.left = Math.max(0, initX) + 'px';
+    box.style.top  = Math.max(0, initY) + 'px';
+    box.classList.toggle('minimized', !!initMin);
+    box.setAttribute('aria-expanded', (!initMin).toString());
+
+    let dragging = false, startX=0, startY=0, baseX=0, baseY=0;
+
+    head.addEventListener('pointerdown', (e)=>{
+      if(e.button!==0 && e.pointerType==='mouse') return;
+      if (e.target.closest('button, [role="button"], .drag-btn, .drag-btns')) return;
+      dragging=true; head.setPointerCapture(e.pointerId);
+      startX=e.clientX; startY=e.clientY;
+      const rect=box.getBoundingClientRect();
+      baseX=rect.left; baseY=rect.top;
+    });
+
+    head.addEventListener('pointermove', (e)=>{
+      if(!dragging) return;
+      const nx = Math.max(0, baseX + (e.clientX - startX));
+      const ny = Math.max(0, baseY + (e.clientY - startY));
+      box.style.left = nx + 'px';
+      box.style.top  = ny + 'px';
+    });
+
+    head.addEventListener('pointerup', (e)=>{
+      if(!dragging) return;
+      dragging=false; head.releasePointerCapture(e.pointerId);
+      persist();
+    });
+
+    head.addEventListener('dblclick', (e)=>{
+      if (e.target.closest('button, [role="button"], .drag-btn, .drag-btns')) return;
+      e.preventDefault(); e.stopPropagation();
+      toggleMin();
+    });
+
+    function toggleMin(){
+      const nowMin = !box.classList.contains('minimized');
+      box.classList.toggle('minimized', nowMin);
+      box.setAttribute('aria-expanded', (!nowMin).toString());
+      persist();
+    }
+    function persist(){
+      const rect=box.getBoundingClientRect();
+      localStorage.setItem(storageKey, JSON.stringify({
+        x: rect.left, y: rect.top, min: box.classList.contains('minimized')
+      }));
+    }
+    return toggleMin;
+  }
+
+  // 操作メニュー
+  const panel = document.getElementById('panel');
+  const pHead = document.getElementById('panel-head');
+  const pToggle = makeDraggableFixed(panel, pHead, 'pos_panel_fixed', {x:10,y:10});
+  const panelMinBtn = document.getElementById('panel-min');
+  panelMinBtn.addEventListener('click',   (e)=>{ e.stopPropagation(); pToggle(); });
+  panelMinBtn.addEventListener('dblclick',(e)=>{ e.stopPropagation(); pToggle(); });
+  panel.setAttribute('aria-expanded', (!panel.classList.contains('minimized')).toString());
+
+  // 凡例
+  const legend = document.getElementById('legend');
+  const lHead = document.getElementById('legend-head');
+  const lToggle = makeDraggableFixed(legend, lHead, 'pos_legend_fixed', {x:340,y:20});
+  const legendMinBtn = document.getElementById('legend-min');
+  legendMinBtn.addEventListener('click',   (e)=>{ e.stopPropagation(); lToggle(); });
+  legendMinBtn.addEventListener('dblclick',(e)=>{ e.stopPropagation(); lToggle(); });
+  legend.setAttribute('aria-expanded', (!legend.classList.contains('minimized')).toString());
+
+  // 初期凡例高さ
+  resizeLegend();
+})();
+</script>
+</body>
+</html>
