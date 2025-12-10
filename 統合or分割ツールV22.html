@@ -213,6 +213,19 @@
       </div>
     </details>
 
+    <!-- レイヤ設計 -->
+    <details class="control">
+      <summary>レイヤ設計</summary>
+      <div class="subtle">_src 単位で _layer / _role(base/edit) / _visible / _group / _layer_order / _analysis_group / _scenario を設定</div>
+      <div class="row" style="margin-top:6px;">
+        <button class="btn" id="btn-load-layer-design">元データ一覧を読み込む</button>
+        <button class="btn ghost" id="btn-apply-layer-design">レイヤ設計を反映</button>
+      </div>
+      <div style="padding:0 10px 10px;">
+        <div id="layer-design-table-wrap"></div>
+      </div>
+    </details>
+
     <!-- 3) データ削除 -->
     <details class="control">
       <summary>3) データ削除（フィルタ）</summary>
@@ -251,6 +264,7 @@
       </div>
       <div class="row" style="margin-top:6px;">
         <button class="btn" id="btn-export-styled">スタイル書込GeoJSON</button>
+        <button class="btn" id="btn-export-edit">書き込みレイヤのみGeoJSON</button>
         <button class="btn" id="btn-export-percat">カテゴリ別GeoJSON</button>
         <button class="btn" id="btn-export-dissolved">カテゴリ別dissolve</button>
         <button class="btn" id="btn-export-legend">凡例CSV</button>
@@ -382,6 +396,26 @@
     $('#feat-count').textContent = `${fcAll.features.length} features`;
   }
 
+  /* ==== メトリクス計算 ==== */
+
+  function computeMetricsForAllFeatures(){
+    for(const f of fcAll.features){
+      if(!f || !f.geometry) continue;
+      const props = f.properties || (f.properties = {});
+      props._geom_type = f.geometry?.type || '';
+      try{
+        if(f.geometry.type==='Polygon' || f.geometry.type==='MultiPolygon'){
+          const area = turf.area(f);
+          if(Number.isFinite(area)) props.AREA_M2 = area;
+        }
+        if(f.geometry.type==='LineString' || f.geometry.type==='MultiLineString'){
+          const lenKm = turf.length(f, {units:'kilometers'});
+          if(Number.isFinite(lenKm)) props.LENGTH_M = lenKm * 1000;
+        }
+      }catch{}
+    }
+  }
+
   /* ==== レイヤ分割・順序 ==== */
 
   function clearLayers(clearList=true){
@@ -417,6 +451,96 @@
       g2.set(k, {arr, area, orderHint});
     }
     return g2;
+  }
+
+  /* ==== レイヤ設計 ==== */
+
+  function buildLayerDesignTable(){
+    const wrap = $('#layer-design-table-wrap');
+    if(!fcAll.features.length){ wrap.innerHTML='<div class="muted">データを読み込んでください</div>'; return; }
+    const map = new Map();
+    for(const f of fcAll.features){
+      const p = f.properties || {};
+      const src = p._src ?? '';
+      if(!map.has(src)){
+        map.set(src, {
+          _src: src,
+          _layer: p._layer ?? (src || ''),
+          _role: p._role || 'base',
+          _visible: p._visible !== false,
+          _group: p._group ?? '',
+          _layer_order: p._layer_order ?? '',
+          _analysis_group: p._analysis_group ?? '',
+          _scenario: p._scenario ?? ''
+        });
+      }
+    }
+    const rows = [...map.values()].sort((a,b)=>String(a._src).localeCompare(String(b._src),'ja'));
+    const html = `
+      <div class="subtle" style="margin-top:6px;">${rows.length} 行</div>
+      <table class="table" id="layer-design-table">
+        <thead><tr><th>_src</th><th>_layer</th><th>_role</th><th>_visible</th><th>_group</th><th>_layer_order</th><th>_analysis_group</th><th>_scenario</th></tr></thead>
+        <tbody>
+          ${rows.map(r=>`
+            <tr data-src="${escapeHtml(r._src)}">
+              <td class="mono">${escapeHtml(r._src||'(空)')}</td>
+              <td><input name="_layer" value="${escapeHtml(r._layer??'')}"/></td>
+              <td>
+                <select name="_role">
+                  <option value="base" ${r._role==='edit'?'':'selected'}>base</option>
+                  <option value="edit" ${r._role==='edit'?'selected':''}>edit</option>
+                </select>
+              </td>
+              <td style="text-align:center"><input type="checkbox" name="_visible" ${r._visible?'checked':''}/></td>
+              <td><input name="_group" value="${escapeHtml(r._group??'')}"/></td>
+              <td><input name="_layer_order" type="number" value="${r._layer_order===undefined?'':escapeHtml(String(r._layer_order))}"/></td>
+              <td><input name="_analysis_group" value="${escapeHtml(r._analysis_group??'')}"/></td>
+              <td><input name="_scenario" value="${escapeHtml(r._scenario??'')}"/></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+    wrap.innerHTML = html;
+    setStatus('元データ一覧をテーブルに展開しました');
+  }
+
+  function applyLayerDesign(){
+    const table = document.getElementById('layer-design-table');
+    if(!table){ setStatus('先に「元データ一覧を読み込む」を押してください'); return; }
+    const designs = new Map();
+    table.querySelectorAll('tbody tr').forEach(tr=>{
+      const src = tr.dataset.src ?? '';
+      const getVal = sel => tr.querySelector(sel)?.value ?? '';
+      const orderVal = tr.querySelector('input[name="_layer_order"]')?.value ?? '';
+      const orderNum = orderVal==='' ? '' : Number(orderVal);
+      designs.set(src, {
+        _layer: getVal('input[name="_layer"]') || src,
+        _role: tr.querySelector('select[name="_role"]')?.value || 'base',
+        _visible: tr.querySelector('input[name="_visible"]')?.checked ?? true,
+        _group: getVal('input[name="_group"]'),
+        _layer_order: orderNum,
+        _analysis_group: getVal('input[name="_analysis_group"]'),
+        _scenario: getVal('input[name="_scenario"]')
+      });
+    });
+    if(!designs.size){ setStatus('反映対象の行がありません'); return; }
+    let updated=0;
+    for(const f of fcAll.features){
+      const p = f.properties || (f.properties={});
+      const src = p._src ?? '';
+      const d = designs.get(src);
+      if(!d) continue;
+      p._layer = d._layer;
+      p._role = d._role;
+      p._visible = !!d._visible;
+      p._group = d._group;
+      if(d._layer_order==='' || Number.isNaN(d._layer_order)) delete p._layer_order; else p._layer_order = d._layer_order;
+      p._analysis_group = d._analysis_group;
+      p._scenario = d._scenario;
+      updated++;
+    }
+    setStatus(`レイヤ設計を反映：${updated} 件`);
+    refreshBase();
   }
 
   function buildLayers(){
@@ -1062,14 +1186,26 @@
   }
 
   function exportStyledSingle(){
+    computeMetricsForAllFeatures();
     const src = collectTargetFeaturesOrdered();
     const feats = src.map(f=>writeBackStyleProps(JSON.parse(JSON.stringify(f))));
     const out={type:'FeatureCollection',features:feats};
     download(`styled_${timeStamp()}.geojson`, JSON.stringify(out));
   }
 
+  function exportEditOnly(){
+    computeMetricsForAllFeatures();
+    const src = collectTargetFeaturesOrdered();
+    const edits = src.filter(f=> (f.properties||{})._role === 'edit');
+    const feats = edits.map(f=>writeBackStyleProps(JSON.parse(JSON.stringify(f))));
+    const out={type:'FeatureCollection',features:feats};
+    download(`edit_only_${timeStamp()}.geojson`, JSON.stringify(out));
+    setStatus(`書き込みレイヤのみを出力：${feats.length}件`);
+  }
+
   function splitByCategory(){
     if(!currentKey){ setStatus('分類キーを設定してください'); return; }
+    computeMetricsForAllFeatures();
     const source=collectTargetFeaturesOrdered();
     const groups=new Map();
     for(const f of source){
@@ -1089,6 +1225,7 @@
 
   function dissolveByCategory(){
     if(!currentKey){ setStatus('分類キーを設定してください'); return; }
+    computeMetricsForAllFeatures();
     const source=collectTargetFeaturesOrdered();
     const groups=new Map();
     for(const f of source){
@@ -1173,6 +1310,7 @@
       }catch(e){ console.error('load failed', f?.name, e); }
     }
     fcAll={type:'FeatureCollection',features:feats};
+    computeMetricsForAllFeatures();
     setStatus(`読込完了：${added}件追加（合計 ${feats.length}件）`);
     refreshBase();
     if(!$('#class-key').value) buildKeyGuess();
@@ -1214,10 +1352,13 @@
   $('#btn-clear-layers').addEventListener('click', ()=>{ clearLayers(); setStatus('レイヤを解除しました'); });
   $('#btn-apply-order').addEventListener('click', applyOrder);
   $('#btn-export-order').addEventListener('click', exportOrderCsv);
+  $('#btn-load-layer-design').addEventListener('click', buildLayerDesignTable);
+  $('#btn-apply-layer-design').addEventListener('click', applyLayerDesign);
   $('#btn-del-preview').addEventListener('click', previewDelete);
   $('#btn-del-exec').addEventListener('click', execDelete);
   $('#btn-undo').addEventListener('click', undoOnce);
   $('#btn-export-styled').addEventListener('click', exportStyledSingle);
+  $('#btn-export-edit').addEventListener('click', exportEditOnly);
   $('#btn-export-percat').addEventListener('click', splitByCategory);
   $('#btn-export-dissolved').addEventListener('click', dissolveByCategory);
   $('#btn-export-legend').addEventListener('click', exportLegendCsv);
